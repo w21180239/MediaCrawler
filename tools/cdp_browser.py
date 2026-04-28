@@ -316,14 +316,25 @@ class CDPBrowserManager:
         """
         try:
             if config.CDP_CONNECT_EXISTING:
-                # For existing browser (e.g. chrome://inspect/#remote-debugging),
-                # Chrome exposes a WebSocket at /devtools/browser and may show a confirmation
-                # dialog to the user. Use ws:// with a longer timeout to wait for user confirmation.
-                ws_url = f"ws://localhost:{self.debug_port}/devtools/browser"
+                # Chrome launched with --remote-debugging-port exposes the WebSocket at
+                # /devtools/browser/<uuid>; the bare /devtools/browser path returns 404.
+                # Fetch the actual ws URL from /json/version, with retry to give the user
+                # time to accept any chrome://inspect confirmation dialog.
+                ws_url = None
+                deadline = asyncio.get_event_loop().time() + config.BROWSER_LAUNCH_TIMEOUT
+                last_err: Optional[Exception] = None
+                while asyncio.get_event_loop().time() < deadline:
+                    try:
+                        ws_url = await self._get_browser_websocket_url(self.debug_port)
+                        break
+                    except Exception as e:
+                        last_err = e
+                        await asyncio.sleep(2)
+                if not ws_url:
+                    raise RuntimeError(
+                        f"Cannot resolve WebSocket URL on port {self.debug_port}: {last_err}"
+                    )
                 utils.logger.info(f"[CDPBrowserManager] Connecting to existing browser via CDP: {ws_url}")
-                utils.logger.info(
-                    "[CDPBrowserManager] Please check your browser for a confirmation dialog and accept it"
-                )
                 self.browser = await playwright.chromium.connect_over_cdp(
                     ws_url, timeout=config.BROWSER_LAUNCH_TIMEOUT * 1000
                 )
